@@ -1,0 +1,6 @@
+{
+  "name": "Chef Waqas Recipes",
+  "description": "A premier recipe and culinary assistant application featuring signature South Asian and fusion recipes, an interactive AI recipe assistant, cooking timers, and personalized bookmarks by Chef Waqas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

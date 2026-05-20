@@ -1,0 +1,78 @@
+{
+  "entities": {
+    "UserPrivateInfo": {
+      "title": "User private profile",
+      "description": "Information containing user credentials and display profile securely isolated",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "UserBookmark": {
+      "title": "Recipe Bookmark",
+      "description": "Collection entry specifying that a user favorited this recipe ID",
+      "type": "object",
+      "properties": {
+        "recipeId": { "type": "string" },
+        "savedAt": { "type": "string" }
+      },
+      "required": ["recipeId", "savedAt"]
+    },
+    "CustomRecipe": {
+      "title": "Custom Recipe Record",
+      "description": "AI-generated or custom-designed recipe created by the user and saved to Firestore",
+      "type": "object",
+      "properties": {
+        "recipeName": { "type": "string" },
+        "description": { "type": "string" },
+        "prepTime": { "type": "number" },
+        "cookTime": { "type": "number" },
+        "servings": { "type": "number" },
+        "difficulty": { "type": "string" },
+        "course": { "type": "string" },
+        "ingredients": { "type": "array" },
+        "steps": { "type": "array" },
+        "chefTricks": { "type": "array" },
+        "isCustom": { "type": "boolean" },
+        "savedAt": { "type": "string" }
+      },
+      "required": ["recipeName", "description", "prepTime", "cookTime", "ingredients", "steps"]
+    },
+    "ChatMessageRecord": {
+      "title": "Chat Message Record",
+      "description": "Individual message node tracking conversational context between the user and Chef Waqas",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "role": { "type": "string" },
+        "content": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "role", "content", "timestamp", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/private/info": {
+      "schema": "UserPrivateInfo",
+      "description": "Access isolated root profile documentation and credentials"
+    },
+    "/users/{userId}/bookmarks/{recipeId}": {
+      "schema": "UserBookmark",
+      "description": "Allows logged-in users to persist and view their recipe bookmarks"
+    },
+    "/users/{userId}/custom_recipes/{recipeId}": {
+      "schema": "CustomRecipe",
+      "description": "User created custom-designed recipes from our AI kitchen lab"
+    },
+    "/users/{userId}/chat_history/{messageId}": {
+      "schema": "ChatMessageRecord",
+      "description": "Individual chat logs for persistent cooking consultations"
+    }
+  }
+}

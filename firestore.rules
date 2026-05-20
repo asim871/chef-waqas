@@ -1,0 +1,109 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Catch-all deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Common/Primitive helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validation blueprints for entities
+    function isValidUserPrivateInfo(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'photoURL', 'createdAt'])
+        && data.keys().size() == 5
+        && data.uid == request.auth.uid
+        && data.email is string && data.email.size() <= 200
+        && data.displayName is string && data.displayName.size() <= 200
+        && data.photoURL is string && data.photoURL.size() <= 2000
+        && data.createdAt == request.time;
+    }
+
+    function isValidUserBookmark(data) {
+      return data.keys().hasAll(['recipeId', 'savedAt'])
+        && data.keys().size() == 2
+        && data.recipeId is string && data.recipeId.size() <= 128
+        && data.savedAt == request.time;
+    }
+
+    function isValidCustomRecipe(data) {
+      return data.keys().hasAll(['recipeName', 'description', 'prepTime', 'cookTime', 'servings', 'difficulty', 'course', 'ingredients', 'steps', 'chefTricks', 'isCustom', 'savedAt'])
+        && data.keys().size() == 12
+        && data.recipeName is string && data.recipeName.size() <= 200
+        && data.description is string && data.description.size() <= 1000
+        && (data.prepTime is int || data.prepTime is float)
+        && (data.cookTime is int || data.cookTime is float)
+        && (data.servings is int || data.servings is float)
+        && data.difficulty is string && data.difficulty.size() <= 30
+        && data.course is string && data.course.size() <= 30
+        && data.ingredients is list && data.ingredients.size() <= 100
+        && data.steps is list && data.steps.size() <= 50
+        && data.chefTricks is list && data.chefTricks.size() <= 20
+        && data.isCustom is bool
+        && data.savedAt == request.time;
+    }
+
+    function isValidChatMessageRecord(data) {
+      return data.keys().hasAll(['id', 'role', 'content', 'timestamp', 'createdAt'])
+        && data.keys().size() == 5
+        && data.id is string && data.id.size() <= 128
+        && data.role is string && (data.role == 'user' || data.role == 'model')
+        && data.content is string && data.content.size() <= 5000
+        && data.timestamp is string && data.timestamp.size() <= 100
+        && data.createdAt == request.time;
+    }
+
+    // Core application document match branches
+    match /users/{userId} {
+      
+      // Top level matching
+      allow read: if isOwner(userId);
+
+      // Private Info Sub-collection (PII is isolated and strictly guarded)
+      match /private/info {
+        allow get: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidUserPrivateInfo(request.resource.data);
+        allow update: if isOwner(userId) && isValidUserPrivateInfo(request.resource.data)
+          && request.resource.data.uid == resource.data.uid; // prevent changing owner ID
+        allow delete: if false; // Profiles are immortal
+      }
+
+      // Bookmarks Sub-collection
+      match /bookmarks/{recipeId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(recipeId) && isValidUserBookmark(request.resource.data);
+        allow update: if isOwner(userId) && isValidId(recipeId) && isValidUserBookmark(request.resource.data)
+          && request.resource.data.recipeId == resource.data.recipeId;
+        allow delete: if isOwner(userId) && isValidId(recipeId);
+      }
+
+      // Custom Recipes Sub-collection
+      match /custom_recipes/{recipeId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(recipeId) && isValidCustomRecipe(request.resource.data);
+        allow update: if isOwner(userId) && isValidId(recipeId) && isValidCustomRecipe(request.resource.data);
+        allow delete: if isOwner(userId) && isValidId(recipeId);
+      }
+
+      // Chat History Sub-collection
+      match /chat_history/{messageId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(messageId) && isValidChatMessageRecord(request.resource.data);
+        allow update: if false; // Chat histories are immutable after they are voiced
+        allow delete: if isOwner(userId) && isValidId(messageId);
+      }
+    }
+  }
+}
