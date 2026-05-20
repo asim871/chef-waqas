@@ -11,15 +11,27 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// Initialize Gemini client strictly according to the SDK skill
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    }
+// Helper to lazily initialize or retrieve the Gemini client safely
+function getAIClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim().length === 0) {
+    console.warn("[Chef Waqas API] GEMINI_API_KEY is not defined or is placeholder. Using robust direct knowledge fallbacks.");
+    return null;
   }
-});
+  try {
+    return new GoogleGenAI({
+      apiKey: apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
+  } catch (err) {
+    console.warn("[Chef Waqas API] Error instantiating GoogleGenAI:", err);
+    return null;
+  }
+}
 
 // Signature recipes from Chef Waqas
 const SIGNATURE_RECIPES = [
@@ -319,64 +331,69 @@ Do NOT include any surrounding codeblock markdown or ticks (like \`\`\`json or \
 
   // Array of models to try in sequence to manage 503 demand spikes dynamically
   const modelsToTry = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
+  const ai = getAIClient();
 
-  for (const modelName of modelsToTry) {
-    try {
-      console.log(`[Chef Waqas API] Attempting recipe generation using model: ${modelName}`);
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: instructions,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              recipeName: { type: Type.STRING, description: "A creative name in the style of Chef Waqas." },
-              description: { type: Type.STRING, description: "A warm introduction in Chef Waqas' first-person narrative." },
-              prepTime: { type: Type.INTEGER, description: "Preparation time in minutes." },
-              cookTime: { type: Type.INTEGER, description: "Active cooking time in minutes." },
-              servings: { type: Type.INTEGER, description: "Servings count." },
-              difficulty: { type: Type.STRING, description: "Difficulty level - Easy, Medium, or Hard." },
-              course: { type: Type.STRING, description: "Mains, Dessert, Breads, or Appetizer." },
-              ingredients: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: "Precise list of formatted ingredient lines."
+  if (ai) {
+    for (const modelName of modelsToTry) {
+      try {
+        console.log(`[Chef Waqas API] Attempting recipe generation using model: ${modelName}`);
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: instructions,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                recipeName: { type: Type.STRING, description: "A creative name in the style of Chef Waqas." },
+                description: { type: Type.STRING, description: "A warm introduction in Chef Waqas' first-person narrative." },
+                prepTime: { type: Type.INTEGER, description: "Preparation time in minutes." },
+                cookTime: { type: Type.INTEGER, description: "Active cooking time in minutes." },
+                servings: { type: Type.INTEGER, description: "Servings count." },
+                difficulty: { type: Type.STRING, description: "Difficulty level - Easy, Medium, or Hard." },
+                course: { type: Type.STRING, description: "Mains, Dessert, Breads, or Appetizer." },
+                ingredients: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "Precise list of formatted ingredient lines."
+                },
+                steps: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "Chronological, detailed cooking instructions."
+                },
+                chefTricks: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "Special culinary secrets or tips from Chef Waqas' kitchen book."
+                }
               },
-              steps: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: "Chronological, detailed cooking instructions."
-              },
-              chefTricks: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: "Special culinary secrets or tips from Chef Waqas' kitchen book."
-              }
-            },
-            required: ["recipeName", "description", "prepTime", "cookTime", "servings", "difficulty", "course", "ingredients", "steps", "chefTricks"],
+              required: ["recipeName", "description", "prepTime", "cookTime", "servings", "difficulty", "course", "ingredients", "steps", "chefTricks"],
+            }
           }
-        }
-      });
+        });
 
-      const responseText = response.text ? response.text.trim() : "";
-      if (responseText) {
-        let data;
-        // Fallback parser in case AI yields markdown blocks
-        const jsonStart = responseText.indexOf('{');
-        const jsonEnd = responseText.lastIndexOf('}');
-        if (jsonStart !== -1 && jsonEnd !== -1) {
-          data = JSON.parse(responseText.slice(jsonStart, jsonEnd + 1));
-        } else {
-          data = JSON.parse(responseText);
+        const responseText = response.text ? response.text.trim() : "";
+        if (responseText) {
+          let data;
+          // Fallback parser in case AI yields markdown blocks
+          const jsonStart = responseText.indexOf('{');
+          const jsonEnd = responseText.lastIndexOf('}');
+          if (jsonStart !== -1 && jsonEnd !== -1) {
+            data = JSON.parse(responseText.slice(jsonStart, jsonEnd + 1));
+          } else {
+            data = JSON.parse(responseText);
+          }
+          
+          console.log(`[Chef Waqas API] Generation succeeded cleanly with model ${modelName}`);
+          return res.json({ success: true, recipe: data, fallbackUsed: false });
         }
-        
-        console.log(`[Chef Waqas API] Generation succeeded cleanly with model ${modelName}`);
-        return res.json({ success: true, recipe: data, fallbackUsed: false });
+      } catch (err: any) {
+        console.warn(`[Chef Waqas API] Model ${modelName} failed. Error code: ${err.status || err.code || "unknown"}. Proceeding to fallback options.`, err.message || err);
       }
-    } catch (err: any) {
-      console.warn(`[Chef Waqas API] Model ${modelName} failed. Error code: ${err.status || err.code || "unknown"}. Proceeding to fallback options.`, err.message || err);
     }
+  } else {
+    console.log("[Chef Waqas API] Skipping generative AI models (no client available). Directing immediately to handcrafted generator.");
   }
 
   // Absolute flawless fallback: If both AI models fail or are unavailable, generate an exquisite recipe directly!
@@ -416,28 +433,33 @@ Always encourage cooking with love and precision!
   }).join("\n");
 
   const modelsToTry = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
+  const ai = getAIClient();
 
-  for (const modelName of modelsToTry) {
-    try {
-      console.log(`[Chef Waqas Chat] Attempting chat with model: ${modelName}`);
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: `${chatContext}\nChef Waqas' Response:`,
-        config: {
-          systemInstruction: chefSystemInstruction,
-          temperature: 0.8,
-          topP: 0.95
+  if (ai) {
+    for (const modelName of modelsToTry) {
+      try {
+        console.log(`[Chef Waqas Chat] Attempting chat with model: ${modelName}`);
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: `${chatContext}\nChef Waqas' Response:`,
+          config: {
+            systemInstruction: chefSystemInstruction,
+            temperature: 0.8,
+            topP: 0.95
+          }
+        });
+
+        const answer = response.text ? response.text.trim() : "";
+        if (answer) {
+          console.log(`[Chef Waqas Chat] Chat answered successfully via model: ${modelName}`);
+          return res.json({ success: true, response: answer, fallbackUsed: false });
         }
-      });
-
-      const answer = response.text ? response.text.trim() : "";
-      if (answer) {
-        console.log(`[Chef Waqas Chat] Chat answered successfully via model: ${modelName}`);
-        return res.json({ success: true, response: answer, fallbackUsed: false });
+      } catch (err: any) {
+        console.warn(`[Chef Waqas Chat] Chat model ${modelName} failed. Proceeding...`, err.message || err);
       }
-    } catch (err: any) {
-      console.warn(`[Chef Waqas Chat] Chat model ${modelName} failed. Proceeding...`, err.message || err);
     }
+  } else {
+    console.log("[Chef Waqas Chat] Skipping AI backend chat (no client available). Invoking local direct helper.");
   }
 
   // Exquisite direct linguistic fallback when AI chatbot is inaccessible
