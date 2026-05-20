@@ -20,3 +20,15 @@ export interface ChatMessage {
   content: string;
   timestamp: string;
 }
+
+export interface ActiveKitchenTimer {
+  id: string;
+  label: string;
+  duration: number; // in seconds
+  secondsLeft: number;
+  isActive: boolean;
+  isCompleted: boolean;
+  recipeName?: string;
+  stepIndex?: number;
+}
+

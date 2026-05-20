@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Recipe, ChatMessage } from "./types";
+import { Recipe, ChatMessage, ActiveKitchenTimer } from "./types";
 import {
   Search,
   Sparkles,
@@ -28,7 +28,8 @@ import {
   CloudOff,
   LogIn,
   LogOut,
-  RefreshCw
+  RefreshCw,
+  Calendar
 } from "lucide-react";
 import RecipeCard from "./components/RecipeCard";
 import RecipeNarrator from "./components/RecipeNarrator";
@@ -53,8 +54,10 @@ import {
   signInWithGoogle, 
   logoutUser, 
   handleFirestoreError, 
-  OperationType 
+  OperationType,
+  getAccessToken
 } from "./firebase";
+import { scheduleMealOnGoogleCalendar } from "./utils/calendar";
 import { 
   onAuthStateChanged, 
   User 
@@ -138,6 +141,25 @@ export default function App() {
   const [timerCompletedAlert, setTimerCompletedAlert] = useState<boolean>(false);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Modern concurrent timers and notification configurations
+  const [cookTimers, setCookTimers] = useState<ActiveKitchenTimer[]>(() => {
+    try {
+      const saved = localStorage.getItem("chef_waqas_running_timers");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [customTimerLabel, setCustomTimerLabel] = useState<string>("");
+  const [customTimerMinutes, setCustomTimerMinutes] = useState<string>("5");
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      return Notification.permission;
+    }
+    return "default";
+  });
+
+
   // Spoken narration highlights
   const [narratingSection, setNarratingSection] = useState<"info" | "ingredients" | "steps" | "tricks" | null>(null);
   const [narratingIndex, setNarratingIndex] = useState<number | null>(null);
@@ -172,6 +194,13 @@ export default function App() {
   const [isChefThinking, setIsChefThinking] = useState<boolean>(false);
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
 
+  // Google Calendar scheduling state
+  const [calendarDateTime, setCalendarDateTime] = useState<string>("");
+  const [calendarGuests, setCalendarGuests] = useState<string>("");
+  const [isScheduling, setIsScheduling] = useState<boolean>(false);
+  const [calendarSuccessEvent, setCalendarSuccessEvent] = useState<{ htmlLink: string; summary: string } | null>(null);
+  const [calendarError, setCalendarError] = useState<string | null>(null);
+
   // Suggested questions list
   const suggestedQuestions = [
     "What is the secret to a soft Tandoori Naan?",
@@ -198,6 +227,21 @@ export default function App() {
     }
     testConnection();
   }, []);
+
+  // Set default calendar date-time (1 hour in the future) when opening a recipe details modal
+  useEffect(() => {
+    if (selectedRecipe) {
+      const date = new Date();
+      date.setHours(date.getHours() + 1);
+      date.setMinutes(0);
+      const tzOffset = date.getTimezoneOffset() * 60000; // offset in ms
+      const localISOTime = (new Date(date.getTime() - tzOffset)).toISOString().slice(0, 16);
+      setCalendarDateTime(localISOTime);
+      setCalendarGuests("");
+      setCalendarSuccessEvent(null);
+      setCalendarError(null);
+    }
+  }, [selectedRecipe]);
 
   // Listen to Auth State and synchronize state with Firestore
   useEffect(() => {
@@ -421,32 +465,127 @@ export default function App() {
     }
   }, [chatMessages]);
 
-  // Handle countdown active kitchen timer
+  // Web Audio chime generator
+  const PlayAmbientKitchenChime = () => {
+    try {
+      const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtxClass) return;
+      const audioCtx = new AudioCtxClass();
+      
+      // Gorgeous 2-chord acoustic major third chime
+      const osc1 = audioCtx.createOscillator();
+      const gain1 = audioCtx.createGain();
+      osc1.type = "sine";
+      osc1.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+      gain1.gain.setValueAtTime(0.12, audioCtx.currentTime);
+      gain1.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 1.2);
+      osc1.connect(gain1);
+      gain1.connect(audioCtx.destination);
+      osc1.start();
+      osc1.stop(audioCtx.currentTime + 1.2);
+
+      const osc2 = audioCtx.createOscillator();
+      const gain2 = audioCtx.createGain();
+      osc2.type = "sine";
+      osc2.frequency.setValueAtTime(1108.73, audioCtx.currentTime + 0.15); // C#6 (Major third harmonizer)
+      gain2.gain.setValueAtTime(0.10, audioCtx.currentTime + 0.15);
+      gain2.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 1.5);
+      osc2.connect(gain2);
+      gain2.connect(audioCtx.destination);
+      osc2.start(audioCtx.currentTime + 0.15);
+      osc2.stop(audioCtx.currentTime + 1.5);
+    } catch (e) {
+      console.warn("Audio Context playback constrained/ignored:", e);
+    }
+  };
+
+  const DispatchCulinaryNotification = (title: string, bodyText: string) => {
+    // Play synthesized warm chime
+    PlayAmbientKitchenChime();
+
+    // Browser level desktop push API
+    if (typeof window !== "undefined" && "Notification" in window) {
+      if (Notification.permission === "granted") {
+        try {
+          new Notification(title, {
+            body: bodyText,
+            icon: "./src/assets/images/chef_waqas_1779297988068.png",
+            tag: "chef-waqas-kitchen-alert"
+          });
+        } catch (err) {
+          console.warn("Desktop Notification dispatch ignored by host sandbox:", err);
+        }
+      }
+    }
+  };
+
+  // Save running timers state to localStorage
   useEffect(() => {
-    if (timerIsActive) {
-      timerIntervalRef.current = setInterval(() => {
-        setTimerSecondsLeft((prev) => {
-          if (prev <= 1) {
-            setTimerIsActive(false);
-            setTimerCompletedAlert(true);
-            if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-            return 0;
-          }
-          return prev - 1;
+    localStorage.setItem("chef_waqas_running_timers", JSON.stringify(cookTimers));
+  }, [cookTimers]);
+
+  // Handle countdown for ALL timers (manual primary timer AND multiple named concurrent timers)
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    const hasActiveMultiTimers = cookTimers.some(t => t.isActive);
+    const hasAnyActivity = timerIsActive || hasActiveMultiTimers;
+
+    if (hasAnyActivity) {
+      interval = setInterval(() => {
+        // 1. Tick the main primary timer
+        if (timerIsActive) {
+          setTimerSecondsLeft((prev) => {
+            if (prev <= 1) {
+              setTimerIsActive(false);
+              setTimerCompletedAlert(true);
+              DispatchCulinaryNotification(
+                selectedRecipe ? `Chef Waqas: ${selectedRecipe.recipeName}` : "Active Kitchen Timer",
+                "Your main recipe timer is complete! Time to inspect the food."
+              );
+              return 0;
+            }
+            return prev - 1;
+          });
+        }
+
+        // 2. Tick each of the custom concurrent timers
+        setCookTimers((prevTimers) => {
+          let modified = false;
+          const nextTimers = prevTimers.map((timer) => {
+            if (timer.isActive && timer.secondsLeft > 0) {
+              modified = true;
+              const nextLeft = timer.secondsLeft - 1;
+              const isDone = nextLeft <= 0;
+              const nextActive = !isDone;
+
+              if (isDone) {
+                // Completed! Raise notification
+                DispatchCulinaryNotification(
+                  `Culinary Step Done: ${timer.label}`,
+                  "Your active cooking interval has finished. Acknowledge soon!"
+                );
+              }
+
+              return {
+                ...timer,
+                secondsLeft: nextLeft,
+                isActive: nextActive,
+                isCompleted: isDone ? true : timer.isCompleted
+              };
+            }
+            return timer;
+          });
+          return modified ? nextTimers : prevTimers;
         });
       }, 1000);
     } else {
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-      }
+      if (interval) clearInterval(interval);
     }
 
     return () => {
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-      }
+      if (interval) clearInterval(interval);
     };
-  }, [timerIsActive]);
+  }, [timerIsActive, cookTimers, selectedRecipe]);
 
   // Rotation of gourmet loading messages in generator to make it engaging!
   useEffect(() => {
@@ -472,6 +611,39 @@ export default function App() {
   }, [isGeneratingRecipe]);
 
   // --- ACTIONS ---
+
+  const handleScheduleMeal = async () => {
+    if (!selectedRecipe) return;
+    if (!calendarDateTime) {
+      setCalendarError("Please select a date and time for your cooking session.");
+      return;
+    }
+
+    const token = getAccessToken();
+    if (!token) {
+      setCalendarError("Authentication token is missing. Please sign in or authorize calendar permission.");
+      return;
+    }
+
+    setIsScheduling(true);
+    setCalendarError(null);
+    setCalendarSuccessEvent(null);
+
+    try {
+      const response = await scheduleMealOnGoogleCalendar({
+        recipe: selectedRecipe,
+        dateTime: calendarDateTime,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+        guests: calendarGuests
+      }, token);
+
+      setCalendarSuccessEvent(response);
+    } catch (err: any) {
+      setCalendarError(err.message || "An unexpected error occurred while scheduling.");
+    } finally {
+      setIsScheduling(false);
+    }
+  };
 
   const handleToggleBookmark = async (e: React.MouseEvent, recipe: Recipe) => {
     e.stopPropagation();
@@ -547,6 +719,82 @@ export default function App() {
     setTimerSecondsLeft(timerDuration);
     setTimerCompletedAlert(false);
   };
+
+  // Helper to request notification permission
+  const handleRequestNotificationPermission = async () => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      try {
+        const res = await Notification.requestPermission();
+        setNotificationPermission(res);
+      } catch (err) {
+        console.warn("Could not retrieve notification permissions:", err);
+      }
+    }
+  };
+
+  // Helper to extract duration mentions from a step's text
+  const parseMinutesFromStepText = (stepText: string): number | null => {
+    // Check for "X to Y minutes", "X-Y min", "X minutes", "X min"
+    const regexRange = /(\d+)\s*(?:-|to)\s*(\d+)\s*(?:min|minute)s?/i;
+    const matchRange = stepText.match(regexRange);
+    if (matchRange) {
+      const maxMins = parseInt(matchRange[2], 10);
+      return !isNaN(maxMins) && maxMins > 0 ? maxMins : null;
+    }
+
+    const regexSingle = /(\d+)\s*(?:min|minute)s?/i;
+    const matchSingle = stepText.match(regexSingle);
+    if (matchSingle) {
+      const mins = parseInt(matchSingle[1], 10);
+      return !isNaN(mins) && mins > 0 ? mins : null;
+    }
+
+    return null;
+  };
+
+  // Create a custom running timer
+  const handleCreateCustomTimer = (label: string, minutes: number, stepIndex?: number) => {
+    if (!label.trim()) {
+      label = "Custom Kitchen Interval";
+    }
+    const secs = Math.floor(minutes * 60);
+    if (secs <= 0) return;
+
+    const newTimer: ActiveKitchenTimer = {
+      id: `${Date.now()}-${Math.random()}`,
+      label: label.trim(),
+      duration: secs,
+      secondsLeft: secs,
+      isActive: true,
+      isCompleted: false,
+      recipeName: selectedRecipe?.recipeName,
+      stepIndex
+    };
+
+    setCookTimers((prev) => [newTimer, ...prev]);
+  };
+
+  // Toggle active/paused status of a specific custom timer
+  const handleToggleCustomTimer = (id: string) => {
+    setCookTimers((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, isActive: !t.isActive } : t))
+    );
+  };
+
+  // Reset a custom timer back to its initial duration
+  const handleResetCustomTimer = (id: string) => {
+    setCookTimers((prev) =>
+      prev.map((t) =>
+        t.id === id ? { ...t, secondsLeft: t.duration, isActive: false, isCompleted: false } : t
+      )
+    );
+  };
+
+  // Remove a custom timer
+  const handleDeleteCustomTimer = (id: string) => {
+    setCookTimers((prev) => prev.filter((t) => t.id !== id));
+  };
+
 
   // Ingredient list handlers for generator
   const handleAddIngredient = () => {
@@ -1638,6 +1886,158 @@ export default function App() {
                 }} 
               />
 
+              {/* GOOGLE CALENDAR SCHEDULING WIDGET */}
+              <div id="google-calendar-scheduler" className="bg-stone-50 border border-stone-200/80 rounded-2.5xl p-5 sm:p-6 space-y-4">
+                <div className="flex items-start gap-3">
+                  <div className="p-2.5 bg-amber-500/10 text-amber-600 rounded-xl">
+                    <Calendar className="w-5 h-5 text-amber-600" />
+                  </div>
+                  <div className="space-y-0.5">
+                    <h4 className="font-serif font-black text-stone-900 text-base leading-snug">
+                      Schedule cooking with Chef Waqas
+                    </h4>
+                    <p className="text-xs text-stone-500 leading-relaxed">
+                      Sync this recipe directly to your Google Calendar as a detailed cooking session, including ingredient shopping lists and secret tips!
+                    </p>
+                  </div>
+                </div>
+
+                {calendarSuccessEvent ? (
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4.5 space-y-3 animate-fade-in">
+                    <div className="flex items-start gap-2.5">
+                      <div className="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center shrink-0 text-xs font-bold mt-0.5">✓</div>
+                      <div>
+                        <h5 className="font-bold text-stone-900 text-sm">Heirloom Recipe Scheduled Successfully!</h5>
+                        <p className="text-xs text-stone-600 mt-1">
+                          "<strong>{calendarSuccessEvent.summary}</strong>" is now synced with your main Google Calendar.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2.5 pt-1">
+                      <a
+                        href={calendarSuccessEvent.htmlLink}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition duration-150 cursor-pointer shadow-3xs"
+                      >
+                        Open Google Calendar ↗
+                      </a>
+                      <button
+                        onClick={() => {
+                          setCalendarSuccessEvent(null);
+                        }}
+                        className="px-3 py-2 bg-stone-200/80 hover:bg-stone-200 text-stone-700 text-xs font-semibold rounded-xl transition duration-150 cursor-pointer"
+                      >
+                        Schedule Another
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {calendarError && (
+                      <div className="bg-rose-50 border border-rose-200 rounded-2xl p-3.5 text-xs text-rose-800 font-medium leading-relaxed flex items-start gap-2 animate-fade-in">
+                        <span className="shrink-0 text-base select-none leading-none">&#9888;</span>
+                        <div className="space-y-1">
+                          <p className="font-bold">Culinary sync error</p>
+                          <p>{calendarError}</p>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {/* Date Time Picker */}
+                      <div className="space-y-1.5">
+                        <label className="block text-[10px] sm:text-xs uppercase font-extrabold text-stone-500 tracking-wider">
+                          Select Cooking Date & Time
+                        </label>
+                        <input
+                          type="datetime-local"
+                          value={calendarDateTime}
+                          onChange={(e) => setCalendarDateTime(e.target.value)}
+                          className="w-full px-3.5 py-2.5 bg-white border border-stone-200 hover:border-stone-300 focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 text-stone-800 text-sm rounded-xl outline-hidden font-medium transition duration-150"
+                        />
+                      </div>
+
+                      {/* Guest Invites */}
+                      <div className="space-y-1.5">
+                        <label className="block text-[10px] sm:text-xs uppercase font-extrabold text-stone-500 tracking-wider">
+                          Invite Guests (Emails, comma separated)
+                        </label>
+                        <input
+                          type="text"
+                          value={calendarGuests}
+                          onChange={(e) => setCalendarGuests(e.target.value)}
+                          placeholder="spouse@google.com, friend@example.com"
+                          className="w-full px-3.5 py-2.5 bg-white border border-stone-200 hover:border-stone-300 focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 text-stone-800 text-sm rounded-xl outline-hidden transition duration-150"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="pt-1 flex flex-col sm:flex-row items-center justify-between gap-3">
+                      {!user ? (
+                        <>
+                          <p className="text-xs text-stone-500 font-medium leading-relaxed text-center sm:text-left">
+                            Please log in with Google to authorize calendar access and schedule your meals.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                setCalendarError(null);
+                                await signInWithGoogle();
+                              } catch (err: any) {
+                                setCalendarError(err.message || "Google Authentication failed.");
+                              }
+                            }}
+                            className="w-full sm:w-auto px-4.5 py-2.5 bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs uppercase tracking-wider rounded-xl transition duration-150 flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                          >
+                            Sign In with Google
+                          </button>
+                        </>
+                      ) : !getAccessToken() ? (
+                        <>
+                          <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse inline-block shrink-0" />
+                            <p className="text-xs text-stone-600 font-medium leading-relaxed">
+                              Calendar syncing requires refreshing permissions. Please authorize below.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                setCalendarError(null);
+                                await signInWithGoogle();
+                              } catch (err: any) {
+                                setCalendarError(err.message || "Google Authentication failed.");
+                              }
+                            }}
+                            className="w-full sm:w-auto px-4.5 py-2.5 bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs uppercase tracking-wider rounded-xl transition duration-150 flex items-center justify-center gap-1.5 cursor-pointer shrink-0 animate-pulse"
+                          >
+                            Authorize Calendar
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <div className="flex items-center gap-2 text-stone-600 text-xs font-semibold">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse inline-block" />
+                            <span>Authenticated as {user.email}</span>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={isScheduling}
+                            onClick={handleScheduleMeal}
+                            className="w-full sm:w-auto px-5 py-2.5 bg-stone-900 hover:bg-stone-800 disabled:bg-stone-400 text-white font-black text-xs uppercase tracking-wider rounded-xl transition duration-150 flex items-center justify-center gap-1.5 cursor-pointer shrink-0 shadow-sm"
+                          >
+                            {isScheduling ? "Scheduling Session..." : "Schedule Session"}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* INTEGRATED ACTIVE KITCHEN TIMER DISPLAY PANEL */}
               <div id="kitchen-timer-panel" className="bg-stone-900 text-white rounded-2.5xl p-5 border border-stone-800 shadow-lg relative overflow-hidden">
                 <div className="absolute right-0 bottom-0 top-0 w-1/4 opacity-10 bg-[radial-gradient(circle_at_bottom_right,_var(--tw-gradient-stops))] from-amber-500 via-stone-900 to-transparent pointer-events-none" />
@@ -1738,6 +2138,151 @@ export default function App() {
                     💨 Quick Steam (10m)
                   </button>
                 </div>
+
+                {/* Concurrent Timers Engine Section */}
+                <div className="mt-4 pt-4 border-t border-stone-800/80 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {/* Left: Create Multi-Timer Form & Permission Banner */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase tracking-wider font-extrabold text-amber-400">Create Step/Task Timer</span>
+                      
+                      {/* Notification permission button */}
+                      {notificationPermission === "default" ? (
+                        <button
+                          onClick={handleRequestNotificationPermission}
+                          className="text-[10px] text-stone-300 hover:text-white underline font-semibold flex items-center gap-1 cursor-pointer"
+                        >
+                          🔔 Enable Desktop Alerts
+                        </button>
+                      ) : notificationPermission === "granted" ? (
+                        <span className="text-[9px] text-emerald-400 font-extrabold tracking-wide uppercase flex items-center gap-1 bg-emerald-950/40 border border-emerald-900 px-2 py-0.5 rounded">
+                          ● Alerts Synced
+                        </span>
+                      ) : (
+                        <span className="text-[9px] text-amber-500 font-extrabold tracking-wide uppercase bg-stone-950/45 border border-stone-800 px-2 py-0.5 rounded">
+                          🔕 Alerts Blocked
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row items-stretch gap-2">
+                      <input
+                        type="text"
+                        placeholder="Name (e.g. Sautéing beef, Dum bubble)"
+                        value={customTimerLabel}
+                        onChange={(e) => setCustomTimerLabel(e.target.value)}
+                        className="flex-grow bg-stone-800 border border-stone-700 rounded-xl px-3 py-1.5 text-xs text-white placeholder-stone-500 focus:outline-none focus:border-amber-500"
+                      />
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-center bg-stone-800 border border-stone-700 rounded-xl px-2 py-1 gap-1">
+                          <input
+                            type="number"
+                            className="w-10 bg-transparent text-white text-xs font-bold focus:outline-none text-center"
+                            value={customTimerMinutes}
+                            onChange={(e) => setCustomTimerMinutes(e.target.value)}
+                            min="1"
+                            max="180"
+                          />
+                          <span className="text-[10px] text-stone-400 uppercase font-bold">m</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const mins = parseFloat(customTimerMinutes);
+                            if (!isNaN(mins) && mins > 0) {
+                              handleCreateCustomTimer(customTimerLabel || "Custom Step Interval", mins);
+                              setCustomTimerLabel("");
+                            }
+                          }}
+                          className="bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs px-4 py-2 uppercase rounded-xl tracking-wider shrink-0 duration-150 cursor-pointer"
+                        >
+                          Add
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right: Active Multi-Timers Lists */}
+                  <div className="space-y-2 max-h-[160px] overflow-y-auto scrollbar-thin scrollbar-thumb-stone-700 scrollbar-track-transparent">
+                    <span className="text-[10px] uppercase tracking-wider font-extrabold text-stone-400 block mb-1">
+                      Running Cooking Tasks ({cookTimers.length})
+                    </span>
+                    {cookTimers.length === 0 ? (
+                      <div className="text-xs text-stone-500 italic py-2 border border-dashed border-stone-800 rounded-xl text-center">
+                        No active item timers running. Initiate custom timers above or in the steps list!
+                      </div>
+                    ) : (
+                      cookTimers.map((timer) => {
+                        const percent = Math.max(0, Math.min(100, (timer.secondsLeft / timer.duration) * 100));
+                        return (
+                          <div key={timer.id} className={`p-2.5 rounded-xl border flex flex-col gap-1.5 transition duration-200 ${
+                            timer.isCompleted 
+                              ? "bg-rose-950/40 border-rose-900 text-rose-200" 
+                              : "bg-stone-800/80 border-stone-700 text-stone-200"
+                          }`}>
+                            <div className="flex items-center justify-between text-xs font-semibold gap-2">
+                              <span className="truncate pr-1 block font-medium">
+                                {timer.isCompleted ? "⌛ " : "🔥 "} 
+                                {timer.label}
+                              </span>
+                              <div className="flex items-center gap-2 font-mono shrink-0 font-bold">
+                                <span className={timer.isCompleted ? "text-rose-400 animate-pulse text-xs animate-bounce" : "text-amber-400"}>
+                                  {formatTimerLabel(timer.secondsLeft)}
+                                </span>
+                                {timer.isCompleted && <span className="text-[9px] bg-red-950/60 text-red-500 px-1 rounded animate-pulse">Done!</span>}
+                              </div>
+                            </div>
+
+                            {/* Nice horizontal progress bar */}
+                            <div className="w-full bg-stone-900 rounded-full h-1 relative overflow-hidden">
+                              <div 
+                                className={`h-full rounded-full transition-all duration-1000 ${
+                                  timer.isCompleted ? "bg-rose-500" : "bg-amber-400"
+                                }`}
+                                style={{ width: `${percent}%` }}
+                              />
+                            </div>
+
+                            {/* Timer control buttons */}
+                            <div className="flex items-center justify-between pt-0.5">
+                              <span className="text-[9.5px] text-stone-400 font-mono scale-95 origin-left">
+                                {Math.ceil(timer.duration / 60)}m preset
+                              </span>
+                              <div className="flex items-center gap-1.5">
+                                {!timer.isCompleted && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleCustomTimer(timer.id)}
+                                    className="p-1 hover:bg-stone-700 text-stone-300 hover:text-white rounded transition cursor-pointer"
+                                    title={timer.isActive ? "Pause timer" : "Play timer"}
+                                  >
+                                    {timer.isActive ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleResetCustomTimer(timer.id)}
+                                  className="p-1 hover:bg-stone-700 text-stone-300 hover:text-white rounded transition cursor-pointer"
+                                  title="Reset to start time"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteCustomTimer(timer.id)}
+                                  className="p-1 hover:bg-stone-700 text-stone-300 hover:text-rose-400 rounded transition cursor-pointer"
+                                  title="Dismiss timer"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
               </div>
 
               {/* Two columns: Ingredients (left) & Cooking steps (right) */}
@@ -1837,8 +2382,36 @@ export default function App() {
                             <Check className="w-3.5 h-3.5 stroke-[3px]" />
                           </button>
 
-                          <div className="space-y-1">
-                            <span className="text-[11px] font-extrabold uppercase tracking-widest block text-amber-700">Stage {idx + 1}</span>
+                          <div className="space-y-1 flex-grow">
+                            <div className="flex flex-wrap items-center justify-between gap-2.5">
+                              <span className="text-[11px] font-extrabold uppercase tracking-widest block text-amber-700">Stage {idx + 1}</span>
+                              
+                              {/* Step Timer Shortcut Trigger */}
+                              {(() => {
+                                const parsedMins = parseMinutesFromStepText(step);
+                                return parsedMins !== null ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCreateCustomTimer(`Stage ${idx + 1}: ${selectedRecipe.recipeName.slice(0, 15)}...`, parsedMins, idx)}
+                                    className="px-2 py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 rounded-lg text-[9.5px] font-extrabold transition-all duration-150 flex items-center gap-1 cursor-pointer hover:scale-[1.03] select-none shrink-0"
+                                    title={`Instantly spawn a ${parsedMins} minute timer for this stage`}
+                                  >
+                                    <Clock className="w-2.8 h-2.8 text-amber-700 animate-pulse" />
+                                    <span>⏱️ Run {parsedMins}m Timer</span>
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCreateCustomTimer(`Stage ${idx + 1}: ${selectedRecipe.recipeName.slice(0, 15)}...`, 5, idx)}
+                                    className="px-2 py-1 bg-stone-100 hover:bg-amber-50 text-stone-600 hover:text-amber-900 border border-stone-200 hover:border-amber-300 rounded-lg text-[9.5px] font-semibold transition-all duration-150 flex items-center gap-1 cursor-pointer select-none shrink-0"
+                                    title="Spawn default 5m stage timer"
+                                  >
+                                    <Clock className="w-2.8 h-2.8 text-stone-400" />
+                                    <span>⏱️ Standard 5m</span>
+                                  </button>
+                                );
+                              })()}
+                            </div>
                             <p className="text-sm font-medium leading-relaxed">{step}</p>
                           </div>
                         </div>
