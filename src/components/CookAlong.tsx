@@ -196,30 +196,111 @@ export default function CookAlong({ recipe, onClose, getIngredientImage, chefWaq
     const currentStepText = recipe.steps[currentStepIndex] || "";
     const stepLower = currentStepText.toLowerCase();
     
-    // Clean step text punctuation
-    const cleanedStep = stepLower.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, " ");
+    // Clean step text punctuation, keeping letters, numbers, and spaces
+    const cleanedStep = stepLower.replace(/[^a-z0-9]/g, " ");
+    const stepTokens = cleanedStep.split(/\s+/).filter(token => token.length > 0);
 
-    return recipe.ingredients.filter(ing => {
-      const ingLower = ing.toLowerCase();
-      
-      // Terms we ignore because they are generic measurement units and details
-      const skipWords = new Set([
-        "cup", "cups", "tablespoon", "tbsp", "teaspoon", "tsp", "g", "ml", "gram", "grams", 
-        "spoon", "bade", "chammach", "pinch", "pieces", "sliced", "chopped", "of", "and", 
-        "or", "to", "with", "the", "a", "an", "for", "in", "on", "at", "by", "from", "fresh",
-        "ground", "whole", "powder", "minced", "diced", "peeled", "water", "salt", "sugar",
-        "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "1/2", "1/4", "3/4", "1.5", "2.5", "tbsp", "spices"
-      ]);
+    // Common cooking measurements, fractions, and adjectives that should be ignored when looking for core ingredient matches
+    const MEASUREMENT_AND_PREP_NOISE = new Set([
+      "cup", "cups", "tablespoon", "tablespoons", "tbsp", "teaspoon", "teaspoons", "tsp", 
+      "g", "ml", "gram", "grams", "kg", "ounce", "ounces", "tb", "tbs", "oz", 
+      "spoon", "spoons", "bade", "chammach", "pinch", "pinches", "piece", "pieces", "slice", "slices", 
+      "sliced", "chopped", "of", "and", "or", "to", "with", "the", "a", "an", "for", "in", "on", "at", "by", "from", 
+      "fresh", "ground", "whole", "powder", "minced", "diced", "peeled", "warm", "cold", "hot", "active", "dry",
+      "lukewarm", "melted", "grated", "crushed", "shredded", "pureed", "beaten", "sifted", "extra", "virgin",
+      "optional", "taste", "as", "needed", "about", "approx", "approximately", "into", "until", "well", "slowly",
+      "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "1/2", "1/4", "3/4", "1.5", "2.5"
+    ]);
 
-      const ingWords = ingLower.split(/[^a-zA-Z]/).filter(w => w.length > 2 && !skipWords.has(w));
+    // Simple stemming and professional bilingual synonym map tracker
+    const getWordBases = (word: string): string[] => {
+      const norm = word.trim();
+      if (norm.length <= 2) return [norm];
       
-      if (ingWords.length === 0) {
-        // Fallback for simple single-word ingredients like "Water" or "Salt" which were excluded as filter criteria
-        const rawWords = ingLower.split(/[^a-zA-Z]/).filter(w => w.length > 2);
-        return rawWords.some(word => cleanedStep.includes(word));
+      const bases = [norm];
+      
+      // Handle plurals
+      if (norm.endsWith("ies")) {
+        bases.push(norm.slice(0, -3) + "y");
+        bases.push(norm.slice(0, -3) + "i"); // chillies -> chilli
+      } else if (norm.endsWith("ves")) {
+        bases.push(norm.slice(0, -3) + "f"); // leaves -> leaf
+      } else if (norm.endsWith("es")) {
+        bases.push(norm.slice(0, -2)); // tomatoes -> tomato
+      } else if (norm.endsWith("s") && !norm.endsWith("ss")) {
+        bases.push(norm.slice(0, -1)); // onions -> onion
       }
 
-      return ingWords.some(word => cleanedStep.includes(word));
+      // Proactive synonym dictionary for Pakistani/Roman-Urdu and South Asian culinary terms
+      const lower = norm;
+      if (lower === "chili" || lower === "chilly" || lower === "chilli" || lower === "chilies" || lower === "chillies") {
+        bases.push("chili", "chilli", "chilly", "mirch", "mirchi");
+      }
+      if (lower === "flour" || lower === "maida" || lower === "atta") {
+        bases.push("flour", "maida", "atta");
+      }
+      if (lower === "ghee" || lower === "butter" || lower === "oil" || lower === "makkhan") {
+        bases.push("ghee", "butter", "oil", "makkhan");
+      }
+      if (lower === "yeast" || lower === "khameer") {
+        bases.push("yeast", "khameer");
+      }
+      if (lower === "yogurt" || lower === "dahi" || lower === "curd") {
+        bases.push("yogurt", "dahi", "curd");
+      }
+      if (lower === "sugar" || lower === "shakar" || lower === "cheeni" || lower === "shakar") {
+        bases.push("sugar", "shakar", "cheeni");
+      }
+      if (lower === "nigella" || lower === "kalonji" || lower === "seed" || lower === "seeds") {
+        bases.push("nigella", "kalonji", "seed", "seeds");
+      }
+      if (lower === "salt" || lower === "namak") {
+        bases.push("salt", "namak");
+      }
+      if (lower === "milk" || lower === "doodh") {
+        bases.push("milk", "doodh");
+      }
+      if (lower === "water" || lower === "paani" || lower === "pani") {
+        bases.push("water", "paani", "pani");
+      }
+
+      return Array.from(new Set(bases));
+    };
+
+    // Helper to extract core ingredient search words
+    const getCoreIngredientBases = (ingName: string): string[] => {
+      const parts = ingName.toLowerCase().replace(/[^a-z0-9]/g, " ").split(/\s+/);
+      const usefulTokens = parts.filter(p => p.length >= 3 && !MEASUREMENT_AND_PREP_NOISE.has(p));
+      
+      // Fallback if filtering removed everything (e.g. "Salt", "Water", "Milk")
+      const finalTokens = usefulTokens.length > 0 ? usefulTokens : parts.filter(p => p.length >= 2);
+      
+      const allBases: string[] = [];
+      finalTokens.forEach(t => {
+        allBases.push(...getWordBases(t));
+      });
+      return Array.from(new Set(allBases));
+    };
+
+    // Pre-calculate step token base variants
+    const stepTokenBases = new Set<string>();
+    stepTokens.forEach(tok => {
+      getWordBases(tok).forEach(b => stepTokenBases.add(b));
+    });
+
+    return recipe.ingredients.filter(ing => {
+      const ingBases = getCoreIngredientBases(ing);
+      
+      // Look for overlap between the ingredient base words and the step base words
+      const hasIntersection = ingBases.some(base => stepTokenBases.has(base));
+      if (hasIntersection) return true;
+
+      // Fallback substring check in case of complex non-spaced joint strings
+      const ingLower = ing.toLowerCase();
+      const cleanIngNoNumbers = ingLower.replace(/[0-9/.\(\)]/g, " ").trim();
+      const candidateWords = cleanIngNoNumbers.split(/\s+/).filter(w => w.length > 2 && !MEASUREMENT_AND_PREP_NOISE.has(w));
+      
+      return candidateWords.some(word => stepLower.includes(word));
     });
   };
 
