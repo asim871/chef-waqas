@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import RecipeCard from "./components/RecipeCard";
 import RecipeNarrator from "./components/RecipeNarrator";
+import CookAlong from "./components/CookAlong";
 
 import flourImg from "./assets/images/flour.png";
 import yeastImg from "./assets/images/yeast.png";
@@ -125,6 +126,7 @@ export default function App() {
 
   // Selected recipe detail modal
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
+  const [cookAlongActive, setCookAlongActive] = useState<boolean>(false);
   const [checkedIngredients, setCheckedIngredients] = useState<Record<string, boolean>>({});
   const [completedSteps, setCompletedSteps] = useState<Record<number, boolean>>({});
 
@@ -1601,6 +1603,30 @@ export default function App() {
                     <span className="text-base font-black text-stone-900">{selectedRecipe.servings} Plate(s)</span>
                   </div>
                 </div>
+
+                {/* COOK-ALONG ACCESS spotlight */}
+                <div id="cook-along-spotlight" className="bg-gradient-to-r from-amber-500/10 via-orange-500/5 to-amber-600/10 border border-amber-500/20 rounded-2.5xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4 mt-6">
+                  <div className="flex items-center gap-3.5">
+                    <div className="p-3 bg-amber-500 text-stone-950 rounded-2xl shadow-md shrink-0">
+                      <Flame className="w-5 h-5 animate-pulse" />
+                    </div>
+                    <div>
+                      <h4 className="font-serif font-black text-stone-950 text-base flex items-center gap-1.5 leading-snug">
+                        Ready to Cook? Live Guide Active!
+                        <span className="text-[10px] font-black uppercase text-amber-800 bg-amber-100 px-2 py-0.5 rounded tracking-wider">NEW</span>
+                      </h4>
+                      <p className="text-xs text-stone-500 leading-relaxed mt-0.5">Let me guide you step-by-step with automated check-lists & live vocal counts!</p>
+                    </div>
+                  </div>
+                  <button
+                    id="start-cook-along-btn"
+                    onClick={() => setCookAlongActive(true)}
+                    className="w-full sm:w-auto px-5 py-3 bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-stone-950 font-black text-xs uppercase tracking-widest rounded-xl transition duration-150 hover:scale-102 hover:shadow-lg active:scale-98 flex items-center justify-center gap-2 cursor-pointer shrink-0"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-stone-950" />
+                    Start Cook-Along
+                  </button>
+                </div>
               </div>
 
               {/* VOCAL TEXT-TO-SPEECH RECIPE NARRATOR */}
@@ -1875,6 +1901,15 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {cookAlongActive && selectedRecipe && (
+        <CookAlong
+          recipe={selectedRecipe}
+          onClose={() => setCookAlongActive(false)}
+          getIngredientImage={getIngredientImage}
+          chefWaqasImg={chefWaqasImg}
+        />
       )}
 
       {/* FOOTER */}
